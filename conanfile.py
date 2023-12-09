@@ -40,6 +40,12 @@ class OrbbecSDKConan(ConanFile):
             sub_version = "1.8.3"
             dl_url = f"https://dl.orbbec3d.com/dist/orbbecsdk/{sub_version}/OrbbecSDK_{sub_version}_Linux.zip"
             folder_name = "OrbbecSDK_1.8.3_Linux"
+            if self.settings.arch == "x86_64":
+                sub_archive_match = "OrbbecSDK_C_C++_v*_linux_x64_release.zip"
+            elif self.settings.arch == "armv8":
+                sub_archive_match = "OrbbecSDK_C_C++_v*_linux_arm64_release.zip"
+            else:
+                raise EnvironmentError("Unsupported OS")
         elif self.settings.os == "Windows":
             sub_version = "1.8.3"
             dl_url = f"https://dl.orbbec3d.com/dist/orbbecsdk/{sub_version}/OrbbecSDK_{sub_version}_Windows.zip"
@@ -49,7 +55,7 @@ class OrbbecSDKConan(ConanFile):
             elif self.settings.arch == "x86_64":
                 sub_archive_match = "OrbbecSDK_C_C++_v*_win_x64_release.zip"
             else:
-                    raise EnvironmentError("Unsupported OS")
+                raise EnvironmentError("Unsupported OS")
 
 
         if dl_url is None:
@@ -85,7 +91,9 @@ class OrbbecSDKConan(ConanFile):
                 os.path.join(self.package_folder, "lib"))
 
         elif self.settings.os == "Linux":
-            raise NotImplementedError()
+            copy(self, "*.so*", 
+                os.path.join(sdk_root, "lib"), 
+                os.path.join(self.package_folder, "lib"))
         elif self.settings.os == "Windows":
             copy(self, "*.dll", 
                 os.path.join(sdk_root, "lib"), 
