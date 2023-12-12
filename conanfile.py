@@ -27,10 +27,11 @@ class OrbbecSDKConan(ConanFile):
     def layout(self):
         basic_layout(self)
 
-    def build(self):
+    def _package_description(self):
         dl_url = None
         folder_name = None
         sub_version = None
+        sub_archive_match = None
         if self.settings.os == "Macos":
             sub_version = "1.8.1"
             dl_url = f"https://dl.orbbec3d.com/dist/orbbecsdk/{sub_version}/OrbbecSDK_{sub_version}_macOS.zip"
@@ -60,20 +61,28 @@ class OrbbecSDKConan(ConanFile):
 
         if dl_url is None:
             raise EnvironmentError("Unsupported OS")
+        return (dl_url, folder_name, sub_version, sub_archive_match)        
+
+    def build(self):
+        (dl_url, folder_name, sub_version, sub_archive_match) = self._package_description()
         get(self, dl_url, destination=self.source_folder)
 
         files = glob.glob(os.path.join(self.source_folder, folder_name, sub_archive_match))
         if len(files) != 1:
             raise ValueError("Missing Archive.")
 
-        unzip(self, files[0], os.path.join(self.source_folder, "OrbbecSDK"))
-        shutil.move(os.path.join(self.source_folder, "OrbbecSDK", f"OrbbecSDK_v{sub_version}"),
-            os.path.join(self.build_folder, "dist"))
+        # this does now work correctly with symlinks on osx and maybe linux
+        if self.settings.os == "Macos":
+            # python zipfile does not correctly extract the symlinks for the dylib
+            self.run("unzip {} -d {}".format(files[0], os.path.join(self.source_folder, "OrbbecSDK")))
+        else:
+            unzip(self, files[0], os.path.join(self.source_folder, "OrbbecSDK"))
 
 
     def package(self):
+        (dl_url, folder_name, sub_version, sub_archive_match) = self._package_description()
 
-        sdk_root = os.path.join(self.build_folder, "dist", "SDK")
+        sdk_root = os.path.join(self.source_folder, "OrbbecSDK", f"OrbbecSDK_v{sub_version}", "SDK")
         copy(self, "*.h*", 
             os.path.join(sdk_root, "include"), 
             os.path.join(self.package_folder, "include"))
