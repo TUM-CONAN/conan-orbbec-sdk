@@ -72,7 +72,7 @@ class OrbbecSDKConan(ConanFile):
             raise ValueError("Missing Archive.")
 
         # this does now work correctly with symlinks on osx and maybe linux
-        if self.settings.os == "Macos" or self.settings == "Linux":
+        if self.settings.os == "Macos" or self.settings.os == "Linux":
             # python zipfile does not correctly extract the symlinks for the dylib
             self.run("unzip {} -d {}".format(files[0], os.path.join(self.source_folder, "OrbbecSDK")))
         else:
