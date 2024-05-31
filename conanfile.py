@@ -1,5 +1,5 @@
 from conan import ConanFile
-from conan.tools.files import update_conandata, copy, chdir, mkdir, collect_libs, get, rename, unzip
+from conan.tools.files import update_conandata, copy, chdir, mkdir, collect_libs, get, rename, unzip, replace_in_file
 from conan.tools.layout import basic_layout
 from conan.tools.env import Environment
 from conan.tools.env import VirtualRunEnv
@@ -13,7 +13,7 @@ from io import StringIO
 
 class OrbbecSDKConan(ConanFile):
     name = "orbbec-sdk"
-    version = "1.9.4"
+    version = "1.10.5"
 
     description = "Orbbec Camera SDK"
     url = "https://github.com/TUM-CAMP-NARVIS/conan-orbbec-sdk.git"
@@ -29,6 +29,12 @@ class OrbbecSDKConan(ConanFile):
 
     def build(self):
         get(self, f"https://github.com/orbbec/OrbbecSDK/archive/refs/tags/v{self.version}.tar.gz", destination=self.source_folder)
+
+        # enable net-device enumeration by default
+        sdk_root = os.path.join(self.source_folder, f"OrbbecSDK-{self.version}")
+        replace_in_file(self, os.path.join(sdk_root, "misc", "config", "OrbbecSDKConfig_v1.0.xml"),
+            """<EnumerateNetDevice>false</EnumerateNetDevice>""",
+            """<EnumerateNetDevice>true</EnumerateNetDevice>""")
 
 
     def package(self):
