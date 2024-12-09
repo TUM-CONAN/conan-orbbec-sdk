@@ -1,8 +1,11 @@
 from conan import ConanFile
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout, CMakeDeps
 from conan.tools.files import update_conandata, copy, chdir, mkdir, collect_libs, get, rename, unzip, replace_in_file
-from conan.tools.layout import basic_layout
 from conan.tools.env import Environment
 from conan.tools.env import VirtualRunEnv
+from conan.tools.build import check_min_cppstd, stdcpp_library
+from conan.tools.system.package_manager import Apt
+
 import re
 import glob
 import shutil
@@ -13,73 +16,90 @@ from io import StringIO
 
 class OrbbecSDKConan(ConanFile):
     name = "orbbec-sdk"
-    version = "1.10.12"
+    version = "2.0.18"
 
     description = "Orbbec Camera SDK"
     url = "https://github.com/TUM-CAMP-NARVIS/conan-orbbec-sdk.git"
     license = "GPL"
-    settings = "os", "arch"
 
-    def generate(self):
-        env = Environment()
-        return env
+    settings = "os", "arch", "compiler", "build_type"
 
-    def layout(self):
-        basic_layout(self)
+    options = {
+        "shared": [True, False],
+        "fPIC": [True, False],
+    }
+    default_options = {
+        "shared": False,
+        "fPIC": True,
+    }
 
-    def build(self):
-        get(self, f"https://github.com/orbbec/OrbbecSDK/archive/refs/tags/v{self.version}.tar.gz", destination=self.source_folder)
+    def system_requirements(self):
+        if self.settings.os == "Linux":
+            pack_names = []
+            #pack_names.append("libacl1-dev")
+
+            Apt(self).install(pack_names)
+
+    def config_options(self):
+        if self.settings.os == "Windows":
+            del self.options.fPIC
+
+    def configure(self):
+        if self.options.shared:
+            del self.options.fPIC
+
+    def requirements(self):
+        pass
+
+    def build_requirements(self):
+        self.tool_requires("cmake/3.25.3")
+
+    def validate(self):
+        compiler = self.settings.compiler
+        version = str(self.settings.compiler.version)
+
+        if compiler.get_safe("cppstd"):
+            check_min_cppstd(self, 17)
+
+    def source(self):
+        get(self, **self.conan_data["sources"][self.version], strip_root=True, destination=self.source_folder)
 
         # enable net-device enumeration by default
-        sdk_root = os.path.join(self.source_folder, f"OrbbecSDK-{self.version}")
-        replace_in_file(self, os.path.join(sdk_root, "misc", "config", "OrbbecSDKConfig_v1.0.xml"),
+        replace_in_file(self, os.path.join(self.source_folder, "src", "shared", "environment", "OrbbecSDKConfig.xml"),
             """<EnumerateNetDevice>false</EnumerateNetDevice>""",
             """<EnumerateNetDevice>true</EnumerateNetDevice>""")
 
+    def generate(self):
+        tc = CMakeToolchain(self)
+
+        def add_cmake_option(option, value):
+            var_name = "{}".format(option).upper()
+            value_str = "{}".format(value)
+            var_value = "ON" if value_str == 'True' else "OFF" if value_str == 'False' else value_str
+            tc.variables[var_name] = var_value
+
+        for option, value in self.options.items():
+            add_cmake_option(option, value)
+
+        # tc.cache_variables["INTROSPECTION"] = self.options.with_introspection and self.settings.os != "Windows"
+
+        tc.generate()
+
+        deps = CMakeDeps(self)
+        deps.generate()
+
+    def layout(self):
+        cmake_layout(self)
+
+    def build(self):
+        # self._patch_sources()
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
 
     def package(self):
-        sdk_root = os.path.join(self.source_folder, f"OrbbecSDK-{self.version}")
-        copy(self, "*.h*", 
-            os.path.join(sdk_root, "include"), 
-            os.path.join(self.package_folder, "include"))
-
-        copy(self, "OrbbecSDKConfig_*.xml", 
-            os.path.join(sdk_root, "misc", "config"), 
-            os.path.join(self.package_folder, "config"))
-
-        if self.settings.os == "Macos":
-            copy(self, "*.dylib", 
-                os.path.join(sdk_root, "lib", "MacOS"), 
-                os.path.join(self.package_folder, "lib"))
-            copy(self, "*.a", 
-                os.path.join(sdk_root, "lib", "MacOS"), 
-                os.path.join(self.package_folder, "lib"))
-
-        elif self.settings.os == "Linux":
-            if self.settings.arch == "x86_64":
-                copy(self, "*.so*", 
-                    os.path.join(sdk_root, "lib", "linux_x64"), 
-                    os.path.join(self.package_folder, "lib"))
-            elif self.settings.arch == "armv8":
-                copy(self, "*.so*", 
-                    os.path.join(sdk_root, "lib", "arm64"), 
-                    os.path.join(self.package_folder, "lib"))
-
-        elif self.settings.os == "Windows":
-            if self.settings.arch == "x86_64":
-                copy(self, "*.dll", 
-                    os.path.join(sdk_root, "lib", "win_x64"), 
-                    os.path.join(self.package_folder, "bin"))
-                copy(self, "*.lib", 
-                    os.path.join(sdk_root, "lib", "win_x64"), 
-                    os.path.join(self.package_folder, "lib"))
-            elif self.settings.arch == "x86":
-                copy(self, "*.dll", 
-                    os.path.join(sdk_root, "lib", "win_x32"), 
-                    os.path.join(self.package_folder, "bin"))
-                copy(self, "*.lib", 
-                    os.path.join(sdk_root, "lib", "win_x32"), 
-                    os.path.join(self.package_folder, "lib"))
-
+        cmake = CMake(self)
+        cmake.install()
+ 
     def package_info(self):
         self.cpp_info.libs = ["OrbbecSDK"]

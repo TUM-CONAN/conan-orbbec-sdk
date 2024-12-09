@@ -1,0 +1,5 @@
+sources:
+  "2.0.18":
+    url: "https://github.com/orbbec/OrbbecSDK_v2/archive/refs/tags/v2.0.18.tar.gz"
+    sha256: "f4268bb631c9bc6728ebb1884514ab3a6a86e33aeca3e60d687eb04ddc2bd583"
+patches:
