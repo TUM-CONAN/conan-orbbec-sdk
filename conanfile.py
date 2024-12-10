@@ -16,7 +16,7 @@ from io import StringIO
 
 class OrbbecSDKConan(ConanFile):
     name = "orbbec-sdk"
-    version = "2.0.18"
+    version = "2.0.23-rc"
 
     description = "Orbbec Camera SDK"
     url = "https://github.com/TUM-CAMP-NARVIS/conan-orbbec-sdk.git"
@@ -81,7 +81,7 @@ class OrbbecSDKConan(ConanFile):
         for option, value in self.options.items():
             add_cmake_option(option, value)
 
-        # tc.cache_variables["INTROSPECTION"] = self.options.with_introspection and self.settings.os != "Windows"
+        tc.cache_variables["OB_BUILD_EXAMPLES"]= "OFF"
 
         tc.generate()
 
