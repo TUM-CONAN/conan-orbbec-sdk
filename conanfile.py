@@ -16,7 +16,7 @@ from io import StringIO
 
 class OrbbecSDKConan(ConanFile):
     name = "orbbec-sdk"
-    version = "2.0.23-rc"
+    version = "2.3.5"
 
     description = "Orbbec Camera SDK"
     url = "https://github.com/TUM-CAMP-NARVIS/conan-orbbec-sdk.git"
@@ -63,11 +63,6 @@ class OrbbecSDKConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True, destination=self.source_folder)
-
-        # enable net-device enumeration by default
-        replace_in_file(self, os.path.join(self.source_folder, "src", "shared", "environment", "OrbbecSDKConfig.xml"),
-            """<EnumerateNetDevice>false</EnumerateNetDevice>""",
-            """<EnumerateNetDevice>true</EnumerateNetDevice>""")
 
     def generate(self):
         tc = CMakeToolchain(self)

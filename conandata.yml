@@ -5,4 +5,7 @@ sources:
   "2.0.23-rc":
     url: "https://github.com/orbbec/OrbbecSDK_v2/archive/refs/tags/v2.0.23-rc.tar.gz"
     sha256: "5b07c712bed633ed24846e879fcd0aa465e8a59aa99671d30626a570cec0cbf3"
+  "2.3.5":
+    url: "https://github.com/orbbec/OrbbecSDK_v2/archive/refs/tags/v2.3.5.tar.gz"
+    sha256: "a79134fa7d0fa53fab80cae1f6abbd68726571770e856a599fa9b67d0749225f"
 patches:
