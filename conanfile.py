@@ -16,7 +16,7 @@ from io import StringIO
 
 class OrbbecSDKConan(ConanFile):
     name = "orbbec-sdk"
-    version = "2.3.5"
+    version = "2.4.3"
 
     description = "Orbbec Camera SDK"
     url = "https://github.com/TUM-CAMP-NARVIS/conan-orbbec-sdk.git"
