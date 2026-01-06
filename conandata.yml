@@ -14,4 +14,7 @@ sources:
   "2.5.5":
     url: "https://github.com/orbbec/OrbbecSDK_v2/archive/refs/tags/v2.5.5.tar.gz"
     sha256: "dd47e249ddaad3367361e87aa60dc130693b6cba75c8095752242c99e6ad40e1"
+  "2.6.3":
+    url: "https://github.com/orbbec/OrbbecSDK_v2/archive/refs/tags/v2.6.3.tar.gz"
+    sha256: "e58721a79eebe264d84dfe73e4477c7c3be70b87803d2cd1b44c3cc759bcf1aa"
 patches:
