@@ -3,7 +3,7 @@ import os
 from conan import ConanFile
 from conan.tools.build import check_min_cppstd
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, get, rm
+from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get, rm
 
 required_conan_version = ">=2.0"
 
@@ -35,6 +35,9 @@ class OrbbecSDKConan(ConanFile):
         "bolt_opengl_compat": False,
     }
 
+    def export_sources(self):
+        export_conandata_patches(self)
+
     def build_requirements(self):
         self.tool_requires("cmake/[>=3.25 <4]")
 
@@ -47,6 +50,7 @@ class OrbbecSDKConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
+        apply_conandata_patches(self)
 
     def generate(self):
         tc = CMakeToolchain(self)

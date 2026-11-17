@@ -21,3 +21,9 @@ sources:
     url: "https://github.com/orbbec/OrbbecSDK_v2/archive/refs/tags/v2.10.6.tar.gz"
     sha256: "728c3ab1a3c782266cdb69537d2dc5349b28527d1dbb9df5dbb1f765cae259d2"
 patches:
+  "2.10.6":
+    - patch_file: "patches/2.10.6-0001-poll-instead-of-select.patch"
+      patch_description: "poll() instead of select() for sockets and V4L2 (live555 scheduler, TCP/RTP/GVCP/mDNS clients):
+        select() only takes descriptors below FD_SETSIZE (1024); glibc aborts the process for a higher one, which a
+        process with many open files (shared-memory transports) reaches"
+      patch_type: "bugfix"

@@ -1,0 +1,703 @@
+diff --git a/3rdparty/live555/src/BasicUsageEnvironment/BasicTaskScheduler.cpp b/3rdparty/live555/src/BasicUsageEnvironment/BasicTaskScheduler.cpp
+index 76a21d2..6625d9e 100644
+--- a/3rdparty/live555/src/BasicUsageEnvironment/BasicTaskScheduler.cpp
++++ b/3rdparty/live555/src/BasicUsageEnvironment/BasicTaskScheduler.cpp
+@@ -20,6 +20,15 @@ along with this library; if not, write to the Free Software Foundation, Inc.,
+ #include "BasicUsageEnvironment.hh"
+ #include "HandlerSet.hh"
+ #include <stdio.h>
++#if !defined(__WIN32__) && !defined(_WIN32)
++// poll() instead of select() (patch of the TUM-CONAN recipe): select() only watches sockets numbered below
++// FD_SETSIZE (1024), and setBackgroundHandling() silently ignored a higher one, so a process with many open files
++// stopped receiving its streams.
++#include <poll.h>
++#include <errno.h>
++#include <vector>
++#define LIVE555_USE_POLL 1
++#endif
+ #if defined(_QNX4)
+ #include <sys/select.h>
+ #include <unix.h>
+@@ -67,10 +76,11 @@ void BasicTaskScheduler::schedulerTickTask() {
+ #endif
+ 
+ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
++#ifndef LIVE555_USE_POLL
+     fd_set readSet      = fReadSet;       // make a copy for this select() call
+     fd_set writeSet     = fWriteSet;      // ditto
+     fd_set exceptionSet = fExceptionSet;  // ditto
+-
++#endif
+     DelayInterval const &timeToDelay = fDelayQueue.timeToNextAlarm();
+     struct timeval       tv_timeToDelay;
+     tv_timeToDelay.tv_sec  = timeToDelay.seconds();
+@@ -89,6 +99,51 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
+         tv_timeToDelay.tv_usec = maxDelayTime % MILLION;
+     }
+ 
++#ifdef LIVE555_USE_POLL
++    std::vector<struct pollfd> pollFds;
++    {
++        HandlerIterator    pollIter(*fHandlers);
++        HandlerDescriptor *h;
++        while((h = pollIter.next()) != NULL) {
++            if(h->socketNum < 0 || h->conditionSet == 0)
++                continue;
++            struct pollfd p;
++            p.fd      = h->socketNum;
++            p.events  = (short)(((h->conditionSet & SOCKET_READABLE) ? POLLIN : 0) | ((h->conditionSet & SOCKET_WRITABLE) ? POLLOUT : 0)
++                               | ((h->conditionSet & SOCKET_EXCEPTION) ? POLLPRI : 0));
++            p.revents = 0;
++            pollFds.push_back(p);
++        }
++    }
++    long long timeoutUs  = (long long)tv_timeToDelay.tv_sec * MILLION + tv_timeToDelay.tv_usec;
++    int       timeoutMs  = (int)((timeoutUs + 999) / 1000);  // tv_sec is capped at MILLION above
++    int selectResult = poll(pollFds.empty() ? NULL : &pollFds[0], (nfds_t)pollFds.size(), timeoutMs);
++    if(selectResult < 0 && errno != EINTR && errno != EAGAIN) {
++#if !defined(_WIN32_WCE)
++        perror("BasicTaskScheduler::SingleStep(): poll() fails");
++#endif
++        internalError();
++    }
++    // The conditions that hold for a socket (as select(): an error or a hang-up makes it readable and writable).
++    auto resultConditions = [&](int sock) -> int {
++        if(selectResult <= 0)
++            return 0;
++        for(size_t i = 0; i < pollFds.size(); ++i) {
++            if(pollFds[i].fd != sock)
++                continue;
++            const short r      = pollFds[i].revents;
++            int         result = 0;
++            if((pollFds[i].events & POLLIN) && (r & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
++                result |= SOCKET_READABLE;
++            if((pollFds[i].events & POLLOUT) && (r & (POLLOUT | POLLHUP | POLLERR | POLLNVAL)))
++                result |= SOCKET_WRITABLE;
++            if((pollFds[i].events & POLLPRI) && (r & POLLPRI))
++                result |= SOCKET_EXCEPTION;
++            return result;
++        }
++        return 0;
++    };
++#else
+     int selectResult = select(fMaxNumSockets, &readSet, &writeSet, &exceptionSet, &tv_timeToDelay);
+     if(selectResult < 0) {
+ #if defined(__WIN32__) || defined(_WIN32)
+@@ -131,6 +186,17 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
+             internalError();
+         }
+     }
++    auto resultConditions = [&](int sock) -> int {
++        int result = 0;
++        if(FD_ISSET(sock, &readSet) && FD_ISSET(sock, &fReadSet) /*sanity check*/)
++            result |= SOCKET_READABLE;
++        if(FD_ISSET(sock, &writeSet) && FD_ISSET(sock, &fWriteSet) /*sanity check*/)
++            result |= SOCKET_WRITABLE;
++        if(FD_ISSET(sock, &exceptionSet) && FD_ISSET(sock, &fExceptionSet) /*sanity check*/)
++            result |= SOCKET_EXCEPTION;
++        return result;
++    };
++#endif
+ 
+     // Call the handler function for one readable socket:
+     HandlerIterator    iter(*fHandlers);
+@@ -149,13 +215,7 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
+     }
+     while((handler = iter.next()) != NULL) {
+         int sock               = handler->socketNum;  // alias
+-        int resultConditionSet = 0;
+-        if(FD_ISSET(sock, &readSet) && FD_ISSET(sock, &fReadSet) /*sanity check*/)
+-            resultConditionSet |= SOCKET_READABLE;
+-        if(FD_ISSET(sock, &writeSet) && FD_ISSET(sock, &fWriteSet) /*sanity check*/)
+-            resultConditionSet |= SOCKET_WRITABLE;
+-        if(FD_ISSET(sock, &exceptionSet) && FD_ISSET(sock, &fExceptionSet) /*sanity check*/)
+-            resultConditionSet |= SOCKET_EXCEPTION;
++        int resultConditionSet = resultConditions(sock);
+         if((resultConditionSet & handler->conditionSet) != 0 && handler->handlerProc != NULL) {
+             fLastHandledSocketNum = sock;
+             // Note: we set "fLastHandledSocketNum" before calling the handler,
+@@ -170,13 +230,7 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
+         iter.reset();
+         while((handler = iter.next()) != NULL) {
+             int sock               = handler->socketNum;  // alias
+-            int resultConditionSet = 0;
+-            if(FD_ISSET(sock, &readSet) && FD_ISSET(sock, &fReadSet) /*sanity check*/)
+-                resultConditionSet |= SOCKET_READABLE;
+-            if(FD_ISSET(sock, &writeSet) && FD_ISSET(sock, &fWriteSet) /*sanity check*/)
+-                resultConditionSet |= SOCKET_WRITABLE;
+-            if(FD_ISSET(sock, &exceptionSet) && FD_ISSET(sock, &fExceptionSet) /*sanity check*/)
+-                resultConditionSet |= SOCKET_EXCEPTION;
++            int resultConditionSet = resultConditions(sock);
+             if((resultConditionSet & handler->conditionSet) != 0 && handler->handlerProc != NULL) {
+                 fLastHandledSocketNum = sock;
+                 // Note: we set "fLastHandledSocketNum" before calling the handler,
+@@ -231,13 +285,11 @@ void BasicTaskScheduler::SingleStep(unsigned maxDelayTime) {
+ void BasicTaskScheduler ::setBackgroundHandling(int socketNum, int conditionSet, BackgroundHandlerProc *handlerProc, void *clientData) {
+     if(socketNum < 0)
+         return;
+-#if !defined(__WIN32__) && !defined(_WIN32) && defined(FD_SETSIZE)
+-    if(socketNum >= (int)(FD_SETSIZE))
+-        return;
+-#endif
++#ifndef LIVE555_USE_POLL
+     FD_CLR((unsigned)socketNum, &fReadSet);
+     FD_CLR((unsigned)socketNum, &fWriteSet);
+     FD_CLR((unsigned)socketNum, &fExceptionSet);
++#endif
+     if(conditionSet == 0) {
+         fHandlers->clearHandler(socketNum);
+         if(socketNum + 1 == fMaxNumSockets) {
+@@ -249,22 +301,21 @@ void BasicTaskScheduler ::setBackgroundHandling(int socketNum, int conditionSet,
+         if(socketNum + 1 > fMaxNumSockets) {
+             fMaxNumSockets = socketNum + 1;
+         }
++#ifndef LIVE555_USE_POLL
+         if(conditionSet & SOCKET_READABLE)
+             FD_SET((unsigned)socketNum, &fReadSet);
+         if(conditionSet & SOCKET_WRITABLE)
+             FD_SET((unsigned)socketNum, &fWriteSet);
+         if(conditionSet & SOCKET_EXCEPTION)
+             FD_SET((unsigned)socketNum, &fExceptionSet);
++#endif
+     }
+ }
+ 
+ void BasicTaskScheduler::moveSocketHandling(int oldSocketNum, int newSocketNum) {
+     if(oldSocketNum < 0 || newSocketNum < 0)
+         return;  // sanity check
+-#if !defined(__WIN32__) && !defined(_WIN32) && defined(FD_SETSIZE)
+-    if(oldSocketNum >= (int)(FD_SETSIZE) || newSocketNum >= (int)(FD_SETSIZE))
+-        return;  // sanity check
+-#endif
++#ifndef LIVE555_USE_POLL
+     if(FD_ISSET(oldSocketNum, &fReadSet)) {
+         FD_CLR((unsigned)oldSocketNum, &fReadSet);
+         FD_SET((unsigned)newSocketNum, &fReadSet);
+@@ -277,6 +328,7 @@ void BasicTaskScheduler::moveSocketHandling(int oldSocketNum, int newSocketNum)
+         FD_CLR((unsigned)oldSocketNum, &fExceptionSet);
+         FD_SET((unsigned)newSocketNum, &fExceptionSet);
+     }
++#endif
+     fHandlers->moveHandler(oldSocketNum, newSocketNum);
+ 
+     if(oldSocketNum + 1 == fMaxNumSockets) {
+diff --git a/src/platform/ethernet/gvcp/GVCPClient.cpp b/src/platform/ethernet/gvcp/GVCPClient.cpp
+index 3c5dddd..7f5af4f 100644
+--- a/src/platform/ethernet/gvcp/GVCPClient.cpp
++++ b/src/platform/ethernet/gvcp/GVCPClient.cpp
+@@ -34,6 +34,7 @@
+ #include "logger/LoggerInterval.hpp"
+ #include "logger/LoggerHelper.hpp"
+ #include "utils/StringUtils.hpp"
++#include "utils/FdWait.hpp"
+ 
+ #if defined(__ANDROID__) && (__ANDROID_API__ < 24)
+ #ifdef __cplusplus
+@@ -824,25 +825,15 @@ void GVCPClient::sendGVCPDiscovery(GVCPSocketInfo socketInfo) {
+     int res;
+     int failedCount = 100;
+     do {
+-        struct timeval timeout;
+-        timeout.tv_sec  = 1;
+-        timeout.tv_usec = 0;
+-
+-        int    nfds = 0;
+-        fd_set readfs;
+-        FD_ZERO(&readfs);
+-        nfds = static_cast<int>(socketInfo.sock) + 1;
+-        FD_SET(socketInfo.sock, &readfs);
+-        if(socketInfo.sockRecv > 0) {
+-            FD_SET(socketInfo.sockRecv, &readfs);
+-            if(socketInfo.sockRecv > socketInfo.sock) {
+-                nfds = static_cast<int>(socketInfo.sockRecv) + 1;
+-            }
+-        }
+-
+-        res = select(nfds, &readfs, 0, 0, &timeout);
++        // fdwait (poll on POSIX): the sockets may be numbered above FD_SETSIZE.
++        fdwait::Entry waitEntries[2];
++        waitEntries[0].fd   = static_cast<int64_t>(socketInfo.sock);
++        waitEntries[0].want = fdwait::kRead;
++        waitEntries[1].fd   = static_cast<int64_t>(socketInfo.sockRecv);
++        waitEntries[1].want = fdwait::kRead;
++        res = fdwait::wait(waitEntries, socketInfo.sockRecv > 0 ? 2 : 1, 1000);
+         if(res > 0) {
+-            if(FD_ISSET(socketInfo.sock, &readfs)) {
++            if(waitEntries[0].ready & fdwait::kRead) {
+                 err = recvAndParseGVCPResponse(socketInfo.sock, socketInfo, gvcpPort);
+                 if(err == SOCKET_ERROR) {
+                     if(failedCount-- < 0) {
+@@ -851,7 +842,7 @@ void GVCPClient::sendGVCPDiscovery(GVCPSocketInfo socketInfo) {
+                     }
+                 }
+             }
+-            if(socketInfo.sockRecv > 0 && FD_ISSET(socketInfo.sockRecv, &readfs)) {
++            if(socketInfo.sockRecv > 0 && (waitEntries[1].ready & fdwait::kRead)) {
+                 err = recvAndParseGVCPResponse(socketInfo.sockRecv, socketInfo, gvcpPort);
+                 if(err == SOCKET_ERROR) {
+                     if(failedCount-- < 0) {
+@@ -860,7 +851,6 @@ void GVCPClient::sendGVCPDiscovery(GVCPSocketInfo socketInfo) {
+                     }
+                 }
+             }
+-            FD_SET(socketInfo.sock, &readfs);
+         }
+     } while(res > 0);
+     // LOG_INFO("finish gvcp discovery {}", sock);
+@@ -916,25 +906,15 @@ bool GVCPClient::sendGVCPForceIP(GVCPSocketInfo socketInfo, std::string mac, con
+     int           failedCount = 100;
+ 
+     do {
+-        struct timeval timeout{};
+-        timeout.tv_sec  = 1;
+-        timeout.tv_usec = 0;
+-
+-        int    nfds = static_cast<int>(socketInfo.sock) + 1;
+-        fd_set readfs;
+-        FD_ZERO(&readfs);
+-        FD_SET(socketInfo.sock, &readfs);
+-
+-        if(socketInfo.sockRecv > 0) {
+-            FD_SET(socketInfo.sockRecv, &readfs);
+-            if(socketInfo.sockRecv > socketInfo.sock) {
+-                nfds = static_cast<int>(socketInfo.sockRecv) + 1;
+-            }
+-        }
+-
+-        res = select(nfds, &readfs, nullptr, nullptr, &timeout);
++        // fdwait (poll on POSIX): the sockets may be numbered above FD_SETSIZE.
++        fdwait::Entry waitEntries[2];
++        waitEntries[0].fd   = static_cast<int64_t>(socketInfo.sock);
++        waitEntries[0].want = fdwait::kRead;
++        waitEntries[1].fd   = static_cast<int64_t>(socketInfo.sockRecv);
++        waitEntries[1].want = fdwait::kRead;
++        res = fdwait::wait(waitEntries, socketInfo.sockRecv > 0 ? 2 : 1, 1000);
+         if(res > 0) {
+-            if(FD_ISSET(socketInfo.sock, &readfs)) {
++            if(waitEntries[0].ready & fdwait::kRead) {
+                 uint8_t     buffer[1024]{};
+                 SOCKADDR_IN senderAddr{};
+                 socklen_t   senderLen = sizeof(senderAddr);
+@@ -953,7 +933,7 @@ bool GVCPClient::sendGVCPForceIP(GVCPSocketInfo socketInfo, std::string mac, con
+                     break;
+                 }
+             }
+-            if(socketInfo.sockRecv > 0 && FD_ISSET(socketInfo.sockRecv, &readfs)) {
++            if(socketInfo.sockRecv > 0 && (waitEntries[1].ready & fdwait::kRead)) {
+                 uint8_t     buffer[1024]{};
+                 SOCKADDR_IN senderAddr{};
+                 socklen_t   senderLen = sizeof(senderAddr);
+diff --git a/src/platform/ethernet/gvcp/GVCPTransmit.cpp b/src/platform/ethernet/gvcp/GVCPTransmit.cpp
+index 072196c..aa860fc 100644
+--- a/src/platform/ethernet/gvcp/GVCPTransmit.cpp
++++ b/src/platform/ethernet/gvcp/GVCPTransmit.cpp
+@@ -35,6 +35,7 @@
+ #include "logger/LoggerHelper.hpp"
+ #include "utils/StringUtils.hpp"
+ #include "utils/Utils.hpp"
++#include "utils/FdWait.hpp"
+ #include "GVCPRuntimeConfig.hpp"
+ 
+ #if defined(__ANDROID__) && (__ANDROID_API__ < 24)
+@@ -125,17 +126,9 @@ void GVCPTransmit::clearSocketReceiveBuffer() {
+     uint64_t     elapsed = 0;
+ 
+     do {
+-        struct timeval timeout;
+-        timeout.tv_sec  = 0;
+-        timeout.tv_usec = 0;  // return immediately
+-
+-        auto   sock = sock_;
+-        auto   nfds = static_cast<int>(sock) + 1;
+-        fd_set readfs;
+-
+-        FD_ZERO(&readfs);
+-        FD_SET(sock, &readfs);
+-        auto res = select(nfds, &readfs, 0, 0, &timeout);
++        auto sock = sock_;
++        // fdwait (poll on POSIX): the socket may be numbered above FD_SETSIZE.
++        auto res = fdwait::waitOne(static_cast<int64_t>(sock), fdwait::kRead, 0);  // return immediately
+         if(res <= 0) {
+             // no any data
+             break;
+@@ -183,15 +176,8 @@ std::vector<char> GVCPTransmit::transmit(const void *data, int dataLength) {
+             return {};
+         }
+         // receive ack
+-        struct timeval timeout;
+-        timeout.tv_sec  = timeoutMs_ / 1000;
+-        timeout.tv_usec = (timeoutMs_ % 1000) * 1000;
+-
+-        fd_set readfs;
+-        FD_ZERO(&readfs);
+-        FD_SET(sock_, &readfs);
+-        auto nfds = static_cast<int>(sock_) + 1;
+-        res       = select(nfds, &readfs, 0, 0, &timeout);
++        // fdwait (poll on POSIX): the socket may be numbered above FD_SETSIZE.
++        res = fdwait::waitOne(static_cast<int64_t>(sock_), fdwait::kRead, static_cast<int>(timeoutMs_));
+         if(res == SOCKET_ERROR) {
+             auto err = GET_LAST_ERROR();
+             if(IS_EINTR(err)) {
+@@ -211,7 +197,7 @@ std::vector<char> GVCPTransmit::transmit(const void *data, int dataLength) {
+             continue;
+         }
+ 
+-        if(FD_ISSET(sock_, &readfs)) {
++        if(res > 0) {  // readable
+             std::vector<char> buffer(GVCP_MAX_PACK_SIZE);
+             SOCKADDR_IN       senderAddr{};
+             socklen_t         senderLen = sizeof(senderAddr);
+diff --git a/src/platform/ethernet/mDNS/MDNSDiscovery.cpp b/src/platform/ethernet/mDNS/MDNSDiscovery.cpp
+index 594eaf8..db4383f 100644
+--- a/src/platform/ethernet/mDNS/MDNSDiscovery.cpp
++++ b/src/platform/ethernet/mDNS/MDNSDiscovery.cpp
+@@ -28,6 +28,7 @@
+ #include "logger/LoggerHelper.hpp"
+ #include "utils/StringUtils.hpp"
+ #include "utils/Utils.hpp"
++#include "utils/FdWait.hpp"
+ #include "mdns/mdns.h"
+ 
+ namespace libobsensor {
+@@ -264,8 +265,6 @@ void MDNSDiscovery::closeClientSockets(std::vector<MDNSSocketInfo> &sockInfos) {
+ }
+ 
+ bool MDNSDiscovery::receiveMDNSResponses(const std::vector<MDNSSocketInfo> &sockInfos, uint8_t *buffer, size_t bufferSize, int timeoutSec, int timeoutUsec) {
+-    int    nfds = 0;
+-    fd_set readfs;
+     bool   receivedData = false;
+     auto   startTime    = std::chrono::steady_clock::now();
+     auto   timeoutMs    = timeoutSec * 1000 + timeoutUsec / 1000;
+@@ -276,22 +275,15 @@ bool MDNSDiscovery::receiveMDNSResponses(const std::vector<MDNSSocketInfo> &sock
+         return elapsed >= timeoutMs;
+     };
+ 
++    // fdwait (poll on POSIX): the sockets may be numbered above FD_SETSIZE.
++    std::vector<fdwait::Entry> waitEntries(sockInfos.size());
+     while(true) {
+-        FD_ZERO(&readfs);
+-        nfds = 0;
+-
+-        for(const auto &info: sockInfos) {
+-            FD_SET(info.sock, &readfs);
+-            if(static_cast<int>(info.sock) + 1 > nfds) {
+-                nfds = static_cast<int>(info.sock) + 1;
+-            }
++        for(size_t i = 0; i < sockInfos.size(); ++i) {
++            waitEntries[i].fd   = static_cast<int64_t>(sockInfos[i].sock);
++            waitEntries[i].want = fdwait::kRead;
+         }
+ 
+-        struct timeval shortTimeout;
+-        shortTimeout.tv_sec  = 0;
+-        shortTimeout.tv_usec = 25000;
+-
+-        int res = select(nfds, &readfs, nullptr, nullptr, &shortTimeout);
++        int res = fdwait::wait(waitEntries.data(), waitEntries.size(), 25);
+         if(res <= 0) {
+             if(isTimeOut()) {
+                 break;
+@@ -299,8 +291,9 @@ bool MDNSDiscovery::receiveMDNSResponses(const std::vector<MDNSSocketInfo> &sock
+             continue;
+         }
+ 
+-        for(const auto &info: sockInfos) {
+-            if(FD_ISSET(info.sock, &readfs)) {
++        for(size_t infoIndex = 0; infoIndex < sockInfos.size(); ++infoIndex) {
++            const auto &info = sockInfos[infoIndex];
++            if(waitEntries[infoIndex].ready & fdwait::kRead) {
+                 int maxRecvCount = 100;  // avoid infinite loop
+                 while(maxRecvCount-- > 0) {
+                     memset(buffer, 0, bufferSize);
+diff --git a/src/platform/ethernet/rtp/ObRTPUDPClient.cpp b/src/platform/ethernet/rtp/ObRTPUDPClient.cpp
+index cfaf3a7..ec10794 100644
+--- a/src/platform/ethernet/rtp/ObRTPUDPClient.cpp
++++ b/src/platform/ethernet/rtp/ObRTPUDPClient.cpp
+@@ -1,6 +1,7 @@
+ #include "ObRTPUDPClient.hpp"
+ #include "logger/Logger.hpp"
+ #include "utils/Utils.hpp"
++#include "utils/FdWait.hpp"
+ #include "exception/ObException.hpp"
+ #include "logger/LoggerInterval.hpp"
+ #include "utils/Utils.hpp"
+@@ -138,15 +139,10 @@ void ObRTPUDPClient::frameReceive() {
+     socklen_t            serverAddrSize = sizeof(serverAddr);
+     std::vector<uint8_t> buffer(OB_UDP_BUFFER_SIZE);
+     while(startReceive_.load()) {
+-        // Wait with select() rather than arming recvfrom() with SO_RCVTIMEO. select()
++        // Wait for readiness rather than arming recvfrom() with SO_RCVTIMEO: the wait
+         // only observes readiness, so its timeout leaves any queued datagram intact.
+-        struct timeval selectTimeout;
+-        selectTimeout.tv_sec  = COMM_TIMEOUT_MS / 1000;
+-        selectTimeout.tv_usec = COMM_TIMEOUT_MS % 1000 * 1000;
+-        fd_set readfds;
+-        FD_ZERO(&readfds);
+-        FD_SET(recvSocket_, &readfds);
+-        int ready = select(static_cast<int>(recvSocket_) + 1, &readfds, nullptr, nullptr, &selectTimeout);
++        // fdwait (poll on POSIX): the socket may be numbered above FD_SETSIZE.
++        int ready = fdwait::waitOne(static_cast<int64_t>(recvSocket_), fdwait::kRead, COMM_TIMEOUT_MS);
+         if(ready == 0) {
+             LOG_WARN_INTVL("Receive rtp packet timed out!");
+             continue;
+@@ -189,17 +185,8 @@ void ObRTPUDPClient::flush() {
+     uint64_t     elapsed = 0;
+ 
+     do {
+-        struct timeval timeout;
+-        timeout.tv_sec  = 0;
+-        timeout.tv_usec = 0;  // return immediately
+-
+-        auto   sock = recvSocket_;
+-        auto   nfds = static_cast<int>(sock) + 1;
+-        fd_set readfs;
+-
+-        FD_ZERO(&readfs);
+-        FD_SET(sock, &readfs);
+-        auto res = select(nfds, &readfs, 0, 0, &timeout);
++        auto sock = recvSocket_;
++        auto res  = fdwait::waitOne(static_cast<int64_t>(sock), fdwait::kRead, 0);  // return immediately
+         if(res <= 0) {
+             // no any data
+             break;
+diff --git a/src/platform/ethernet/socket/VendorTCPClient.cpp b/src/platform/ethernet/socket/VendorTCPClient.cpp
+index 44dabd9..7bdc8e4 100644
+--- a/src/platform/ethernet/socket/VendorTCPClient.cpp
++++ b/src/platform/ethernet/socket/VendorTCPClient.cpp
+@@ -4,6 +4,7 @@
+ #include "VendorTCPClient.hpp"
+ #include "logger/Logger.hpp"
+ #include "utils/Utils.hpp"
++#include "utils/FdWait.hpp"
+ #include "exception/ObException.hpp"
+ 
+ #if (defined(WIN32) || defined(_WIN32) || defined(WINCE))
+@@ -116,30 +117,18 @@ bool VendorTCPClient::checkConnectReady(SOCKET socket, uint32_t timeoutMs) {
+     // Lambda: call select once, check writability and connection error via getsockopt.
+     // fd_set must be re-initialized before every select call because select modifies them.
+     auto checkReady = [&](SOCKET sock) -> bool {
+-        fd_set write, err;
+-        FD_ZERO(&write);
+-        FD_ZERO(&err);
+-        FD_SET(sock, &write);
+-        FD_SET(sock, &err);
+-
+-        TIMEVAL connTimeout;
+ #if(defined(OS_IOS) || defined(OS_MACOS) || defined(__ANDROID__))
+-        connTimeout.tv_sec  = 0;
+-        connTimeout.tv_usec = 100000;  // 100ms
+-#else
+-        connTimeout.tv_sec  = timeoutMs / 1000;
+-        connTimeout.tv_usec = timeoutMs % 1000 * 1000;
+-#endif
+-
+-#if(defined(WIN32) || defined(_WIN32) || defined(WINCE))
+-        auto rst = select(0, NULL, &write, &err, &connTimeout);  // nfds ignored on Windows
++        const int waitMs = 100;
+ #else
+-        auto rst            = select(sock + 1, NULL, &write, &err, &connTimeout);
++        const int waitMs = static_cast<int>(timeoutMs);
+ #endif
++        // fdwait (poll on POSIX): the socket may be numbered above FD_SETSIZE.
++        short ready = 0;
++        auto  rst   = fdwait::waitOne(static_cast<int64_t>(sock), fdwait::kWrite | fdwait::kExcept, waitMs, &ready);
+         if(rst <= 0) {
+             return false;  // timeout or error
+         }
+-        if(!FD_ISSET(sock, &write)) {
++        if(!(ready & fdwait::kWrite)) {
+             return false;  // connection failed
+         }
+         // Verify the connection actually succeeded (works on all platforms)
+diff --git a/src/platform/usb/uvc/ObV4lUvcDevicePort.cpp b/src/platform/usb/uvc/ObV4lUvcDevicePort.cpp
+index 31a618f..b9158b3 100644
+--- a/src/platform/usb/uvc/ObV4lUvcDevicePort.cpp
++++ b/src/platform/usb/uvc/ObV4lUvcDevicePort.cpp
+@@ -17,6 +17,7 @@
+ #include "logger/LoggerInterval.hpp"
+ #include "exception/ObException.hpp"
+ #include "utils/Utils.hpp"
++#include "utils/FdWait.hpp"
+ #include "stream/StreamProfile.hpp"
+ #include "utils/PublicTypeHelper.hpp"
+ #include "frame/FrameFactory.hpp"
+@@ -424,22 +425,17 @@ void ObV4lUvcDevicePort::captureLoop(std::shared_ptr<V4lDeviceHandle> devHandle)
+ 
+         // capture video frames
+         while(devHandle->isCapturing) {
+-            fd_set fds{};
+-            FD_ZERO(&fds);
+-            if(devHandle->fd >= 0) {
+-                FD_SET(devHandle->fd, &fds);
++            // fdwait (poll): the descriptors may be numbered above FD_SETSIZE. A negative one is ignored.
++            fdwait::Entry fds[4];
++            fds[0].fd = devHandle->fd;
++            fds[1].fd = devHandle->metadataFd;
++            fds[2].fd = devHandle->stopPipeFd[0];
++            fds[3].fd = devHandle->stopPipeFd[1];
++            for(auto &e: fds) {
++                e.want = fdwait::kRead;
+             }
+-            if(devHandle->metadataFd >= 0) {
+-                FD_SET(devHandle->metadataFd, &fds);
+-            }
+-            if(devHandle->stopPipeFd[0] >= 0) {
+-                FD_SET(devHandle->stopPipeFd[0], &fds);
+-            }
+-            if(devHandle->stopPipeFd[1] >= 0) {
+-                FD_SET(devHandle->stopPipeFd[1], &fds);
+-            }
+-            struct timeval remaining = { 0, 500000 };  // 500ms
+-            int            val       = select(max_fd + 1, &fds, nullptr, nullptr, &remaining);
++            (void)max_fd;
++            int val = fdwait::wait(fds, 4, 500);  // 500ms
+             if(val < 0) {
+                 if(errno == EINTR) {
+                     LOG_INTVL(LOG_INTVL_OBJECT_TAG + "captureLoop", 5000, spdlog::level::debug, "select interrupted: {}", strerror(errno));
+@@ -453,7 +449,7 @@ void ObV4lUvcDevicePort::captureLoop(std::shared_ptr<V4lDeviceHandle> devHandle)
+                 continue;
+             }
+ 
+-            if(FD_ISSET(devHandle->stopPipeFd[0], &fds) || FD_ISSET(devHandle->stopPipeFd[1], &fds)) {
++            if((fds[2].ready & fdwait::kRead) || (fds[3].ready & fdwait::kRead)) {
+                 if(!devHandle->isCapturing) {
+                     LOG_DEBUG("V4L stream is closed: {}", devHandle->info->name);
+                 }
+@@ -463,8 +459,7 @@ void ObV4lUvcDevicePort::captureLoop(std::shared_ptr<V4lDeviceHandle> devHandle)
+                 break;
+             }
+ 
+-            if(devHandle->metadataFd >= 0 && FD_ISSET(devHandle->metadataFd, &fds)) {
+-                FD_CLR(devHandle->metadataFd, &fds);
++            if(devHandle->metadataFd >= 0 && (fds[1].ready & fdwait::kRead)) {
+                 v4l2_buffer buf = {};
+                 buf.type        = LOCAL_V4L2_BUF_TYPE_META_CAPTURE;
+                 buf.memory      = V4L2_MEMORY_MMAP;
+@@ -481,8 +476,7 @@ void ObV4lUvcDevicePort::captureLoop(std::shared_ptr<V4lDeviceHandle> devHandle)
+                 xioctl(devHandle->metadataFd, VIDIOC_QBUF, &buf);
+             }
+ 
+-            if(FD_ISSET(devHandle->fd, &fds)) {
+-                FD_CLR(devHandle->fd, &fds);
++            if(fds[0].ready & fdwait::kRead) {
+                 v4l2_buffer buf = {};
+                 buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+                 buf.memory      = V4L2_MEMORY_MMAP;
+diff --git a/src/shared/utils/FdWait.hpp b/src/shared/utils/FdWait.hpp
+new file mode 100644
+index 0000000..43ec4f0
+--- /dev/null
++++ b/src/shared/utils/FdWait.hpp
+@@ -0,0 +1,112 @@
++// Copyright (c) Orbbec Inc. All Rights Reserved.
++// Licensed under the MIT License.
++//
++// Waiting for socket / descriptor readiness without select()'s FD_SETSIZE limit (patch of the TUM-CONAN recipe).
++// select() can only watch descriptors below FD_SETSIZE (1024): glibc aborts the process for a higher one ("bit out of
++// range 0 - FD_SETSIZE on fd_set"), and a process with many open files (shared-memory transports, many cameras)
++// opens its sockets above it. POSIX: poll(), any descriptor number. Windows: select() (its fd_set is a list of
++// sockets, without that limit).
++
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++#include <vector>
++
++#if defined(WIN32) || defined(_WIN32) || defined(WINCE)
++#include <winsock2.h>
++#else
++#include <poll.h>
++#endif
++
++namespace libobsensor {
++namespace fdwait {
++
++enum : short { kRead = 1, kWrite = 2, kExcept = 4 };
++
++struct Entry {
++    int64_t fd    = -1;
++    short   want  = 0;  // kRead | kWrite | kExcept
++    short   ready = 0;  // set by wait(): the wanted conditions that hold
++};
++
++// Waits until one of the entries is ready or timeoutMs (< 0: forever) passed. As select(): an error or a hang-up makes
++// a socket readable and writable. Returns the number of ready entries, 0 on timeout, < 0 on error (errno, or
++// WSAGetLastError() on Windows).
++inline int wait(Entry *entries, size_t count, int timeoutMs) {
++    for(size_t i = 0; i < count; ++i) {
++        entries[i].ready = 0;
++    }
++#if defined(WIN32) || defined(_WIN32) || defined(WINCE)
++    fd_set readSet, writeSet, exceptSet;
++    FD_ZERO(&readSet);
++    FD_ZERO(&writeSet);
++    FD_ZERO(&exceptSet);
++    for(size_t i = 0; i < count; ++i) {
++        SOCKET s = static_cast<SOCKET>(entries[i].fd);
++        if(entries[i].want & kRead)
++            FD_SET(s, &readSet);
++        if(entries[i].want & kWrite)
++            FD_SET(s, &writeSet);
++        if(entries[i].want & kExcept)
++            FD_SET(s, &exceptSet);
++    }
++    struct timeval tv;
++    tv.tv_sec  = timeoutMs / 1000;
++    tv.tv_usec = (timeoutMs % 1000) * 1000;
++    int res    = select(0, &readSet, &writeSet, &exceptSet, timeoutMs < 0 ? nullptr : &tv);
++    if(res > 0) {
++        res = 0;
++        for(size_t i = 0; i < count; ++i) {
++            SOCKET s = static_cast<SOCKET>(entries[i].fd);
++            if((entries[i].want & kRead) && FD_ISSET(s, &readSet))
++                entries[i].ready |= kRead;
++            if((entries[i].want & kWrite) && FD_ISSET(s, &writeSet))
++                entries[i].ready |= kWrite;
++            if((entries[i].want & kExcept) && FD_ISSET(s, &exceptSet))
++                entries[i].ready |= kExcept;
++            if(entries[i].ready)
++                ++res;
++        }
++    }
++    return res;
++#else
++    std::vector<struct pollfd> fds(count);
++    for(size_t i = 0; i < count; ++i) {
++        fds[i].fd      = static_cast<int>(entries[i].fd);
++        fds[i].events  = static_cast<short>(((entries[i].want & kRead) ? POLLIN : 0) | ((entries[i].want & kWrite) ? POLLOUT : 0)
++                                           | ((entries[i].want & kExcept) ? POLLPRI : 0));
++        fds[i].revents = 0;
++    }
++    int res = ::poll(fds.empty() ? nullptr : fds.data(), static_cast<nfds_t>(count), timeoutMs);
++    if(res > 0) {
++        res = 0;
++        for(size_t i = 0; i < count; ++i) {
++            const short r = fds[i].revents;
++            if((entries[i].want & kRead) && (r & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
++                entries[i].ready |= kRead;
++            if((entries[i].want & kWrite) && (r & (POLLOUT | POLLHUP | POLLERR | POLLNVAL)))
++                entries[i].ready |= kWrite;
++            if((entries[i].want & kExcept) && (r & POLLPRI))
++                entries[i].ready |= kExcept;
++            if(entries[i].ready)
++                ++res;
++        }
++    }
++    return res;
++#endif
++}
++
++// One descriptor: > 0 ready (the conditions in *ready), 0 timeout, < 0 error.
++inline int waitOne(int64_t fd, short want, int timeoutMs, short *ready = nullptr) {
++    Entry e;
++    e.fd    = fd;
++    e.want  = want;
++    int res = wait(&e, 1, timeoutMs);
++    if(ready)
++        *ready = e.ready;
++    return res;
++}
++
++}  // namespace fdwait
++}  // namespace libobsensor
