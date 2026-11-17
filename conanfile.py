@@ -1,93 +1,68 @@
+import os
+
 from conan import ConanFile
-from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout, CMakeDeps
-from conan.tools.files import update_conandata, copy, chdir, mkdir, collect_libs, get, rename, unzip, replace_in_file
-from conan.tools.env import Environment
-from conan.tools.env import VirtualRunEnv
-from conan.tools.build import check_min_cppstd, stdcpp_library
-from conan.tools.system.package_manager import Apt
+from conan.tools.build import check_min_cppstd
+from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.files import copy, get, rm
 
-import re
-import glob
-import shutil
+required_conan_version = ">=2.0"
 
-import os, sys
-import sysconfig
-from io import StringIO
 
 class OrbbecSDKConan(ConanFile):
     name = "orbbec-sdk"
-    version = "2.6.3"
+    version = "2.10.6"
 
-    description = "Orbbec Camera SDK"
-    url = "https://github.com/TUM-CAMP-NARVIS/conan-orbbec-sdk.git"
-    license = "GPL"
+    description = "Orbbec Camera SDK (OrbbecSDK_v2)"
+    url = "https://github.com/TUM-CONAN/conan-orbbec-sdk.git"
+    homepage = "https://github.com/orbbec/OrbbecSDK_v2"
+    license = "MIT"
 
+    # The SDK only builds as a shared library (src/CMakeLists.txt: add_library(... SHARED ...)). Its API is
+    # C with header-only C++ wrappers, so the binary is ABI-neutral across C++ standards.
+    package_type = "shared-library"
     settings = "os", "arch", "compiler", "build_type"
 
     options = {
-        "shared": [True, False],
-        "fPIC": [True, False],
+        # Network (GigE/PoE) devices such as the Femto Mega over Ethernet.
+        "with_net": [True, False],
+        "with_gmsl": [True, False],
+        # Femto Bolt only: depth engine through OpenGL (needs a display).
+        "bolt_opengl_compat": [True, False],
     }
     default_options = {
-        "shared": False,
-        "fPIC": True,
+        "with_net": True,
+        "with_gmsl": False,
+        "bolt_opengl_compat": False,
     }
 
-    def system_requirements(self):
-        if self.settings.os == "Linux":
-            pack_names = []
-            #pack_names.append("libacl1-dev")
-
-            Apt(self).install(pack_names)
-
-    def config_options(self):
-        if self.settings.os == "Windows":
-            del self.options.fPIC
-
-    def configure(self):
-        if self.options.shared:
-            del self.options.fPIC
-
-    def requirements(self):
-        pass
-
     def build_requirements(self):
-        self.tool_requires("cmake/3.25.3")
+        self.tool_requires("cmake/[>=3.25 <4]")
 
     def validate(self):
-        compiler = self.settings.compiler
-        version = str(self.settings.compiler.version)
+        if self.settings.compiler.get_safe("cppstd"):
+            check_min_cppstd(self, 11)
 
-        if compiler.get_safe("cppstd"):
-            check_min_cppstd(self, 17)
+    def layout(self):
+        cmake_layout(self, src_folder="src")
 
     def source(self):
-        get(self, **self.conan_data["sources"][self.version], strip_root=True, destination=self.source_folder)
+        get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def generate(self):
         tc = CMakeToolchain(self)
-
-        def add_cmake_option(option, value):
-            var_name = "{}".format(option).upper()
-            value_str = "{}".format(value)
-            var_value = "ON" if value_str == 'True' else "OFF" if value_str == 'False' else value_str
-            tc.variables[var_name] = var_value
-
-        for option, value in self.options.items():
-            add_cmake_option(option, value)
-
-        tc.cache_variables["OB_BUILD_EXAMPLES"]= "OFF"
-
+        tc.cache_variables["OB_BUILD_EXAMPLES"] = False
+        tc.cache_variables["OB_BUILD_TESTS"] = False
+        tc.cache_variables["OB_BUILD_TOOLS"] = False
+        tc.cache_variables["OB_BUILD_DOCS"] = False
+        tc.cache_variables["OB_INSTALL_EXAMPLES_SOURCE"] = False
+        tc.cache_variables["OB_BUILD_USB_PAL"] = True
+        tc.cache_variables["OB_BUILD_NET_PAL"] = bool(self.options.with_net)
+        tc.cache_variables["OB_BUILD_GMSL_PAL"] = bool(self.options.with_gmsl)
+        tc.cache_variables["OB_ENABLE_BOLT_OPENGL_COMPAT"] = bool(self.options.bolt_opengl_compat)
         tc.generate()
-
-        deps = CMakeDeps(self)
-        deps.generate()
-
-    def layout(self):
-        cmake_layout(self)
+        CMakeDeps(self).generate()
 
     def build(self):
-        # self._patch_sources()
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
@@ -95,6 +70,17 @@ class OrbbecSDKConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
- 
+        copy(self, "LICENSE.txt", self.source_folder, os.path.join(self.package_folder, "licenses"))
+        # Conan generates the CMake config; drop the SDK's own export files.
+        rm(self, "OrbbecSDKConfig*.cmake", os.path.join(self.package_folder, "lib"))
+        rm(self, "OrbbecSDKVersion.cmake", os.path.join(self.package_folder, "lib"))
+
     def package_info(self):
+        # Same names as the SDK's own export: find_package(OrbbecSDK) -> ob::OrbbecSDK.
+        self.cpp_info.set_property("cmake_file_name", "OrbbecSDK")
+        self.cpp_info.set_property("cmake_target_name", "ob::OrbbecSDK")
         self.cpp_info.libs = ["OrbbecSDK"]
+        if self.settings.os == "Linux":
+            self.cpp_info.system_libs = ["pthread", "dl"]
+        # The SDK loads its extensions (depth engine, filters, frame processor, firmware updater) at run time
+        # from <directory of libOrbbecSDK>/extensions (dladdr); they are installed to lib/extensions.
